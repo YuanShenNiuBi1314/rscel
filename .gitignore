@@ -1,0 +1,22 @@
+/target/
+# §16.2 增量缓存的根：`cache_root` 会从源文件目录向上找，命中过项目根以外位置的
+# （例如临时目录里的单次构建）也会在**那一级**建目录，所以模式不能只锚仓库根。
+.rscel-cache/
+*.bin
+/examples/**/*.rs
+/examples/**/*.map.json
+bad.rscel
+
+# 临时探针产物（rscel-spec-check 实验遗留）
+spec_check.rs
+spec_check.exe
+spec_check.pdb
+
+# 上一行原本和下面的注释挤在同一行（缺换行），那条 pattern 其实谁都没匹配上。
+# 子代理/工具产生的临时审计与额度记录，不是项目内容
+.audit-artifacts/
+.qoder-credits/
+
+# 顶层一次性探针产物（`rscel build -o ce` 之类留下的 PE 与调试符号）
+/ce.exe
+/ce.pdb

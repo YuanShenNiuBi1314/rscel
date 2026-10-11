@@ -1,0 +1,37 @@
+// 基准场景 2：`jump and` 并行派生 + 跨 Cell 转移（业务编排的真实形状）。
+//   200 万个 item，每个派生一个 w 实例 → w 用 plain jump 转移给 stage1 → stage1 收敛。
+//   parent 只 `jump sync` 等待，不读多包结果（slots = 0 → 按 D4 增量回收丢弃）。
+// 对照实现：bench/pipeline_and_hand.rs（同样的线程池 + 同样的两跳函数调用）。
+//
+// **元素数为什么是 200 万而不是 20 万**（2026-10-11, docs/05 P0-5 第 5 项「换量法」① ）：
+// 20 万时单次运行只有 ~13ms，而这场景每份程序 spawn 8+1 个线程，操作系统的调度运气
+// 让**同一份二进制**换个轮转相位就差 ±2.2%–7.8% —— 复现带比要判的差值（几个百分点）
+// 还宽，等于这台基准台在编排形状上分辨不出 5% 以内的任何结论。放大一个数量级把单次
+// 运行推进 ~130ms，调度噪声按元素均摊，带才压得下来。DSL 与两份手写基线**同步**改，
+// 校验值（`done=`）逐字相等仍由 `scripts/bench/run.sh` 硬比对。
+entry main;
+
+cell main;
+receive();
+let t0 = std::time::Instant::now();
+let items: Vec<i64> = (1..=2000000i64).collect();
+// `total` 必须在 `jump and ... over items` **之前**取：over 会把 items move 进组
+// （§10.1 所有权转移），之后再 `items.len()` 就是 use-after-move，生成物会被 rustc
+// E0382 拒掉。手写对照 bench/pipeline_and_hand.rs 本来就是先取 len 再传 Vec，
+// 两边保持同序才是同构对照。（2026-10-10 实测：这一行放在 jump 之后时
+// `rscel build` 直接失败；契约期目前不拦这种写法，见 docs/05-迭代待办.md P1-2。）
+let total = items.len();
+jump and w over items concurrent_limit = 8 group g1;
+jump sync g1;
+println!("done={}", total);
+println!("elapsed_ns={}", t0.elapsed().as_nanos());
+exit go with();
+
+cell w;
+receive(x: i64);
+jump stage1 go with(x -> v);
+
+cell stage1;
+receive(v: i64);
+let y = v * 2 + 1;
+exit go with(y -> d);

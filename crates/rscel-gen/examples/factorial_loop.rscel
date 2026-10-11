@@ -1,0 +1,18 @@
+// 附录 A.1 阶乘（jump loop 版）。开发说明 §19 M1 + §附录 C 第 7 条验收：
+// 经 rscel-gen 生成 Rust → rustc 编译 → 运行必须输出 120。
+// 注解 :i64 是显式书写（S2 类型化调用约定要求参数类型在编译期确定）。
+// rscel-gen 的 D2 已能从入边实参 `1i64 -> acc` 推导出 acc，故此处的注解并非必需，
+// 保留是为了让样例本身自解释。
+// 增加 `out(next_acc);` 让 120 能打印到 stdout（§12.1 out 的最小支持）。
+cell main;
+receive();
+let five: i64 = 5;
+jump fact go with(five -> n, 1i64 -> acc);
+
+cell fact;
+receive(n: i64, acc: i64) as (cur, sum);
+let next = cur - 1;
+let next_acc = sum * cur;
+jump loop fact when next > 0 go with(next, next_acc);
+out(next_acc);
+exit go with(next_acc -> result);

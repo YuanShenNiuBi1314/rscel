@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rscel-parser",
+    "crates/rscel-runtime",
+    "crates/rscel-check",
+    "crates/rscel-gen",
+    "crates/rscel-cli",
+]
+
+[workspace.package]
+version = "0.1.0-a"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/YuanShenNiuBi1314/rsupercell-lang"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

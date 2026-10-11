@@ -1,0 +1,29 @@
+// 探针场景（不是门禁场景）：与 bench/loop_sum_opaque.rscel **同一条循环、同一个
+// checksum**，唯一的区别是热 Cell `sum` 有**两个** plain 调用点（第二条 `jump sum`
+// 在运行时永不成立，因为它前面那条 `when` 恒真）。
+//
+// 为什么要这一格（docs/05 P0-5 第 2 项，2026-10-11）：P0-4 的实体展开只覆盖
+// 「恰好一个 plain 调用点」的同步 Cell，两个调用点的 Cell 仍然发射 `fn cell_x(..)`。
+// docs/06 的判定表已经证明「循环待在独立 fn 里」是**唯一**收费的因素（V01 vs V00 =
+// 3.27 倍；加 `#[inline(always)]` 的 V03 只收回 37%）。所以本格要问的是：
+// 展开闸门里的「恰好一个调用点」这一条本身值多少性能 —— 而不是再猜一个新因素。
+//
+// 测量：bash scripts/bench/ab.sh（GEN_two / GEN_two_exp 两格，数值探针台）。
+entry main;
+
+cell main;
+receive();
+let take_first = std::hint::black_box(true);
+jump sum when take_first go with(std::hint::black_box(0i64) -> acc, std::hint::black_box(1i64) -> k);
+jump sum go with(std::hint::black_box(0i64) -> acc, std::hint::black_box(1i64) -> k);
+
+cell sum;
+receive(acc: i64, k: i64) as (a, i);
+let t0 = std::time::Instant::now();
+let limit = std::hint::black_box(1000000000i64);
+let next_acc = a + i;
+let next_i = i + 1;
+jump loop sum when next_i <= limit go with(next_acc, next_i);
+println!("checksum={}", a);
+println!("elapsed_ns={}", t0.elapsed().as_nanos());
+exit go with();

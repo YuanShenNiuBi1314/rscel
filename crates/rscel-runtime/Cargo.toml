@@ -1,0 +1,16 @@
+[package]
+name = "rscel-runtime"
+description = "RSupercell 运行时：Packet/Group/Semaphore + 标准库自研极简 async executor（零外部依赖）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# 硬约束：本 crate 零外部依赖，对应选型 S1。
+# 模板仍按开发说明 §13.1/§13.5 完整实现并测试（满足 S2 承诺的可选 dyn 后端），
+# 而代码生成主路径按 S2 走类型化调用约定（不依赖本 crate 的 Packet）。
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

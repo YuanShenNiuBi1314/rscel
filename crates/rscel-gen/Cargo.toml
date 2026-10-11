@@ -1,0 +1,14 @@
+[package]
+name = "rscel-gen"
+description = "RSupercell 代码生成：S2 静态类型化调用约定 + identifier rewrite + mangle + srcmap + main_gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rscel-parser = { path = "../rscel-parser" }
+
+[lib]
+path = "src/lib.rs"

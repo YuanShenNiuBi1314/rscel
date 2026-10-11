@@ -1,0 +1,14 @@
+[package]
+name = "rscel-parser"
+description = "RSupercell (rscel) lexer / parser / AST — 无依赖，零占位实现"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# 硬约束：本 crate 零外部依赖，保证 rustc 版本无关、构建可复现。
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

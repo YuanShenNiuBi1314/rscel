@@ -1,0 +1,28 @@
+// 附录 A.5 多分支互斥 + die。
+//
+// 验证：当 val ∈ {1,2,3} 走不同 Cell；其他值走 die。
+// 注解：val 声明为 i64（小 POD / Copy），所有权检查不把它当作 move 资源，
+// 所以三条 jump 复用同一个 val 是合法的（语言规范 §10.2）。
+entry start;
+
+cell start;
+receive(val: i64);
+jump one when val == 1 go with(val -> n);
+jump two when val == 2 go with(val -> n);
+jump three when val == 3 go with(val -> n);
+die;
+
+cell one;
+receive(n: i64);
+out("one got ", n);
+exit go with();
+
+cell two;
+receive(n: i64);
+out("two got ", n);
+exit go with();
+
+cell three;
+receive(n: i64);
+out("three got ", n);
+exit go with();
