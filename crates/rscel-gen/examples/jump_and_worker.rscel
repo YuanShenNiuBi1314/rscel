@@ -1,0 +1,21 @@
+// 附录 A.2 并行 worker（开发说明 §19 M4 验收）。
+//
+// 验证：jump and 派生 3 个 worker 实例 → concurrent_limit=2 限流 →
+//       jump sync g1 等待 → 多包 receive（g1.W1.d / g1.W2.d / g1.W3.d）
+//       按 S4 late binding 在 sync 之后解包 → 求和输出 12。
+//
+// 关键点：并发派生实例的顺序由收集顺序决定（__rsc_run_group 按索引取元素，
+// 结果写回同索引槽位），所以 W1/W2/W3 与 over 集合的元素顺序一一对应，结果可复现。
+entry start;
+
+cell start;
+receive(g1.W1.d, g1.W2.d, g1.W3.d) as (a, b, c);
+let items = [1, 2, 3];
+jump and worker over items concurrent_limit=2 group g1;
+jump sync g1;
+out("total=", a + b + c);
+exit go with();
+
+cell worker;
+receive(x: i64);
+exit go with(x * 2 -> d);

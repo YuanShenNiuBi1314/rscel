@@ -1,0 +1,13 @@
+// 附录 A.6 混合 DSL + extern rust（修正版）。
+//
+// 验证：顶层 extern rust 定义函数被 Cell 内 exit go with(...) 表达式调用。
+// 注：开发说明 §A.6 的 `let r = fast_mul(x, y); let result = r;` 写法在 Rust 里
+// 跨 block scope 会编译失败（r 在 block 外不可见）。本示例把 fast_mul
+// 的调用直接放到 exit 表达式里。
+extern rust {
+    fn fast_mul(a: i64, b: i64) -> i64 { a.wrapping_mul(b) }
+};
+
+cell main;
+receive(a: i64, b: i64);
+exit go with(fast_mul(a, b) -> product);

@@ -1,0 +1,28 @@
+// 基准场景 1b：与 loop_sum **同一条循环**，但起始值改成**对优化器不透明**。
+//
+// 为什么单独开一个场景（2026-10-10）：`loop_sum` 的 DSL 写的是
+// `jump sum go with(0i64 -> acc, 1i64 -> k)`，`cell_sum` 被 `#[inline(always)]`
+// 内联后 LLVM 看到的就是**字面常量**。而真实程序里 Cell 的入参来自 argv、
+// 来自父 Cell 的运行期结果 —— 全是 LLVM 眼里的未知值。实测发现：
+//   · 常量起始：生成物 35.26ms vs 同构手写 35.29ms（打平，比值 0.99）
+//   · 不透明起始：生成物 39.14–48.01ms vs 同构手写 11.76–13.94ms（**慢 3.3×**）
+// 也就是说"99% 转译"目前只在**起始值是常量**这一种情况下成立。本场景把这个
+// 只在运行期入参下才暴露的形状固定成基准，别让它在只测常量的绿灯里被藏掉。
+// 复现：bash scripts/bench/run.sh loop_sum_opaque
+// 归因进度见 docs/05-迭代待办.md P0-4。
+entry main;
+
+cell main;
+receive();
+jump sum go with(std::hint::black_box(0i64) -> acc, std::hint::black_box(1i64) -> k);
+
+cell sum;
+receive(acc: i64, k: i64) as (a, i);
+let t0 = std::time::Instant::now();
+let limit = std::hint::black_box(1000000000i64);
+let next_acc = a + i;
+let next_i = i + 1;
+jump loop sum when next_i <= limit go with(next_acc, next_i);
+println!("checksum={}", a);
+println!("elapsed_ns={}", t0.elapsed().as_nanos());
+exit go with();

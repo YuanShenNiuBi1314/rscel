@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>rscel 编辑器 · 拓扑调试台</title>
+<!--
+  RSupercell（rscel）前端专属编辑器 —— 单文件、零外部依赖（无 CDN、无字体、无框架）。
+  由 `rscel edit` 起的本地 HTTP 服务（只监听 127.0.0.1）通过
+  GET / 提供本页；后端 API 约定：
+
+    POST /api/check   body=form(source)         → {diagnostics:[{code,severity,message,detail,cell,line,col}], cells:n, errors:n, warnings:n}
+    POST /api/graph   body=form(source)         → {nodes:[{name,line,cols,receive:[...],outputs:[...],is_entry,needs_async,terminal}],
+                                                   edges:[{from,to,kind,mode,keys,group,limit,cond,over,stmt,line}],
+                                                   groups:[{name,targets:[...],limit,over,slots}]}
+    POST /api/trace   body=form(source,maxItems)→ {steps:[{seq,cell,stmt,line,kind,text,packet:[{key,value,died}],group,note}], notes:[...]}
+    POST /api/build   body=form(source,mode)    → {exit,rsPath,mapPath,exePath,stdout,stderr,mapped:[{code,detail,rust_code}]}
+    POST /api/save    body=form(source,file)    → {ok,message}
+    GET  /api/source?kind=rs|map|stdout         → 文本
+
+  为什么全部走本地 HTTP 而不是把编译器编成 WASM：本项目的硬规约是
+  「零外部依赖 + 生成物单文件 rustc 可编译」，wasm-bindgen 会引入一整套工具链
+  与 crate；而 `rscel edit` 本来就是同一个 cargo workspace 里的可执行文件，
+  用 std::net 起一个只绑定 127.0.0.1 的循环服务，前端拿到的是**真编译器**的行为
+  （包括真实的 rustc 报错与反映射），不是移植品的近似。
+-->
+<style>
+  :root{
+    --bg:#0f1418; --panel:#161d24; --panel2:#1d262f; --line:#2b3743;
+    --fg:#d7e2ea; --dim:#8fa2b1; --accent:#4fd1c5; --warn:#f0b429; --err:#ff6b6b;
+    --plain:#4fd1c5; --loop:#c792ea; --recurse:#82aaff; --and:#f78c6c; --sync:#ffcb6b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);
+    font:13px/1.55 "Cascadia Mono","JetBrains Mono",Consolas,"Microsoft YaHei",monospace}
+  header{display:flex;align-items:center;gap:10px;padding:8px 14px;
+    background:var(--panel);border-bottom:1px solid var(--line)}
+  header b{font-size:14px;letter-spacing:.5px}
+  header .file{color:var(--dim);font-size:12px}
+  main{display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1.15fr);
+    gap:10px;padding:10px;height:calc(100% - 46px)}
+  .col{display:flex;flex-direction:column;gap:10px;min-height:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .card>h3{margin:0;padding:7px 11px;font-size:12px;font-weight:600;color:var(--dim);
+    background:var(--panel2);border-bottom:1px solid var(--line);
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .card>h3 .tools{display:flex;gap:6px;align-items:center}
+  .body{padding:8px 10px;overflow:auto;min-height:0}
+  button{background:#22303b;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:4px 9px;font:inherit;cursor:pointer}
+  button:hover{background:#2c3e4c;border-color:var(--accent)}
+  button.pri{background:#12414a;border-color:var(--accent)}
+  select,input[type=number]{background:#22303b;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:3px 6px;font:inherit}
+  /* 代码区：textarea 透明字 + 背后 pre 高亮，行号单独一列 */
+  #editorWrap{position:relative;flex:1;display:flex;min-height:0}
+  #gutter{padding:8px 6px 8px 8px;text-align:right;color:#5c6f7d;background:var(--panel2);
+    border-right:1px solid var(--line);overflow:hidden;user-select:none;white-space:pre;line-height:1.55}
+  #hl,#code{position:absolute;left:0;top:0;margin:0;padding:8px 10px;
+    font:13px/1.55 inherit;white-space:pre;tab-size:2;border:0;letter-spacing:0}
+  #hl{pointer-events:none;color:transparent;z-index:0;overflow:auto}
+  #code{background:transparent;color:transparent;caret-color:var(--fg);resize:none;
+    outline:none;z-index:1;overflow:auto;width:100%}
+  #code::selection{background:#2b5f7a}
+  .k{color:#c792ea;font-weight:600}.kw{color:#ffcb6b}.t{color:#82aaff}
+  .s{color:#9ece6a}.c{color:#5c6f7d;font-style:italic}.n{color:#f78c6c}.r{color:#4fd1c5}
+  /* 诊断 */
+  .diag{padding:5px 8px;border-left:3px solid var(--err);margin-bottom:6px;
+    background:#1b232b;border-radius:0 6px 6px 0;cursor:pointer}
+  .diag:hover{background:#222d36}
+  .diag.w{border-left-color:var(--warn)}
+  .diag .code{color:var(--err);font-weight:700}
+  .diag.w .code{color:var(--warn)}
+  .diag .loc{color:var(--dim);font-size:12px}
+  .diag .detail{color:var(--dim);font-size:12px;white-space:pre-wrap;margin-top:3px}
+  /* 拓扑图 */
+  #graph{flex:1;min-height:0;position:relative;overflow:auto;background:
+    radial-gradient(circle at 30% 20%,#132029,#0e1317 70%)}
+  #graph svg{display:block}
+  .node rect{fill:#1b2833;stroke:#3a4d5e;stroke-width:1.4;rx:6}
+  .node.entry rect{stroke:var(--accent);stroke-width:2}
+  .node.sel rect{stroke:#ffcb6b;stroke-width:2.2}
+  .node text{fill:var(--fg);font-size:12px}
+  .node .tname{font-weight:700;font-size:13px;fill:#eaf3f8}
+  .node .slot{fill:var(--dim);font-size:11px}
+  .node{cursor:pointer}
+  .node:hover rect{fill:#22323f}
+  .edge{fill:none;stroke-width:1.8}
+  .edge.plain{stroke:var(--plain)}.edge.loop{stroke:var(--loop);stroke-dasharray:6 4}
+  .edge.recurse{stroke:var(--recurse);stroke-dasharray:2 3}
+  .edge.and{stroke:var(--and)}.edge.sync{stroke:var(--sync);stroke-dasharray:8 3}
+  .elabel{fill:var(--dim);font-size:10px;paint-order:stroke;stroke:#0e1317;stroke-width:3}
+  .dim{opacity:.22}
+  #legend{position:absolute;right:8px;top:8px;background:#141d24cc;border:1px solid var(--line);
+    border-radius:6px;padding:6px 8px;font-size:11px;color:var(--dim)}
+  #legend i{display:inline-block;width:16px;height:0;border-top:2px solid;margin-right:5px;vertical-align:middle}
+  /* 详情 + trace */
+  #detail .row{display:flex;gap:8px;padding:2px 0;border-bottom:1px dashed #223041}
+  #detail .k2{color:var(--dim);min-width:74px}
+  .step{padding:4px 8px;border-left:2px solid var(--line);margin-bottom:4px;background:#182028;
+    font-size:12px;white-space:pre-wrap}
+  .step.cur{border-left-color:var(--accent);background:#1d3138}
+  .step .kk{color:var(--accent)}
+  .step .died{color:var(--err)}
+  pre.out{margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px;color:#c9dae6}
+  .bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid var(--line);
+    background:var(--panel2)}
+  .status{color:var(--dim);font-size:12px;margin-left:auto}
+  .pill{background:#22303b;border:1px solid var(--line);border-radius:20px;padding:1px 8px;font-size:11px}
+  .pill.err{color:var(--err);border-color:#5a2b2b}.pill.warn{color:var(--warn);border-color:#5a4a2b}
+  .pill.ok{color:var(--accent);border-color:#2b5a55}
+</style>
+</head>
+<body>
+<header>
+  <b>rscel</b><span style="color:var(--dim)">拓扑编排 DSL · 前端编辑器</span>
+  <span class="file" id="fileName">未命名（新文档）</span>
+  <span class="pill" id="pillCheck">未检查</span>
+  <span class="pill" id="pillBuild">未构建</span>
+</header>
+
+<main>
+  <!-- 左列：源码 + 诊断 -->
+  <div class="col">
+    <div class="card" style="flex:1.25">
+      <h3>源码 <span class="tools">
+        <select id="example" title="载入内置样例">
+          <option value="">— 载入样例 —</option>
+          <option value="factorial_loop">阶乘（jump loop）</option>
+          <option value="jump_and_worker">并行 worker（jump and + sync）</option>
+          <option value="recurse_return">递归阶乘（recurse + return）</option>
+          <option value="read_with">只读共享（read with / Arc）</option>
+          <option value="multi_source">多源并行（§6.4）</option>
+          <option value="die_branch">互斥分支 + die</option>
+          <option value="broken">故意写错（看诊断）</option>
+        </select>
+        <button id="btnCheck">检查</button>
+        <button id="btnSave">保存</button>
+      </span></h3>
+      <div id="editorWrap">
+        <div id="gutter">1</div>
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="code" spellcheck="false" wrap="off"></textarea>
+      </div>
+      <div class="bar">
+        <span class="status" id="cursorPos">行 1, 列 1</span>
+        <span class="status" id="cellCount" style="margin-left:0"></span>
+      </div>
+    </div>
+
+    <div class="card" style="flex:.85">
+      <h3>诊断 <span class="tools"><span id="diagCount" class="status"></span></span></h3>
+      <div class="body" id="diagnostics"><span style="color:var(--dim)">按「检查」或 Ctrl+Enter 运行前端（parse + C1–C8 静态检查）。</span></div>
+    </div>
+  </div>
+
+  <!-- 右列：拓扑图 + 详情/trace/构建 -->
+  <div class="col">
+    <div class="card" style="flex:1.25">
+      <h3>Cell 拓扑图 <span class="tools">
+        <button id="btnGraph">重排</button>
+        <select id="focusMode" title="高亮模式">
+          <option value="all">全部边</option>
+          <option value="data">数据流（go/read with 键）</option>
+          <option value="group">并发组（and / sync / group）</option>
+          <option value="loop">循环与递归</option>
+        </select>
+      </span></h3>
+      <div id="graph">
+        <div id="legend">
+          <div><i style="border-color:var(--plain)"></i>plain jump（出口转移）</div>
+          <div><i style="border-color:var(--loop);border-top-style:dashed"></i>jump loop（原地循环）</div>
+          <div><i style="border-color:var(--recurse);border-top-style:dotted"></i>jump recurse（子实例）</div>
+          <div><i style="border-color:var(--and)"></i>jump and（并行派生）</div>
+          <div><i style="border-color:var(--sync);border-top-style:dashed"></i>jump sync（等待组）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="flex:1">
+      <h3>
+        <span class="tools" style="gap:4px">
+          <button class="tab pri" data-tab="detail">节点详情</button>
+          <button class="tab" data-tab="trace">拓扑干跑 trace</button>
+          <button class="tab" data-tab="build">构建 &amp; 运行</button>
+          <button class="tab" data-tab="rs">生成物</button>
+        </span>
+        <span class="status" id="tabStatus"></span>
+      </h3>
+      <div class="body" id="pane-detail" style="display:block"><span style="color:var(--dim)">点击拓扑图里的任一 Cell 节点，这里显示它的入口契约（receive）、输出契约（exit go with）、所有权状态与落点诊断。</span></div>
+      <div class="body" id="pane-trace" style="display:none">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <button class="pri" id="btnTrace">干跑模拟</button>
+          <label>over 上限 <input type="number" id="maxItems" value="4" min="1" max="1000" style="width:70px"></label>
+          <button id="btnPlay" disabled>▶ 回放</button>
+          <input type="range" id="timeline" min="0" max="0" value="0" style="flex:1">
+        </div>
+        <div id="traceSteps"><span style="color:var(--dim)">§16.5：不真正 spawn，只按 CFG 顺序模拟消息流转。<code>when</code> 条件只解释字面量与简单标识符比较，复杂表达式标 <code>(uninterpretable)</code>。</span></div>
+      </div>
+      <div class="body" id="pane-build" style="display:none">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <button class="pri" id="btnBuild">rustc 编译并运行</button>
+          <select id="buildMode"><option value="release">--release</option><option value="debug">--debug</option></select>
+          <span class="status" id="buildStat"></span>
+        </div>
+        <pre class="out" id="buildOut"></pre>
+      </div>
+      <div class="body" id="pane-rs" style="display:none">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <select id="artifact"><option value="rs">生成的 .rs</option><option value="map">.map.json 源映射</option></select>
+          <button id="btnArtifact">读取</button>
+          <span class="status" id="artifactPath"></span>
+        </div>
+        <pre class="out" id="artifactOut"></pre>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const codeEl = $("#code"), hlEl = $("#hl"), gutEl = $("#gutter");
+const state = { file: null, source: "", graph: null, sel: null, trace: null, playTimer: 0, artifact: {} };
+
+/* --------------------------------------------------------- 高亮 + 行号 */
+// 手写词法着色：DSL 关键字 / 传输模式 / 类型注解 / 字符串 / 注释 / 数字。
+// 为什么不用现成的 highlight.js：本页必须零外部依赖（离线 + 单文件 + 无 CDN）。
+const KEYWORDS = ["cell","entry","receive","as","jump","and","loop","recurse","sync","when","go","read","force","with","return","over","exit","die","out","group","concurrent_limit","extern","rust"];
+const MODES = ["go with","read with","force go with","force read with"];
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function highlight(src){
+  let out = "", i = 0;
+  const n = src.length;
+  const isIdent = (c) => /[A-Za-z0-9_]/.test(c);
+  while (i < n) {
+    const c = src[i];
+    // 注释
+    if (c === "/" && src[i+1] === "/") {
+      let j = src.indexOf("\n", i); if (j < 0) j = n;
+      out += '<span class="c">' + esc(src.slice(i, j)) + "</span>"; i = j; continue;
+    }
+    // 字符串（含 r#""# 原始串与转义）
+    if (c === '"' || (c === "r" && src[i+1] === '#')) {
+      let j = i + 1;
+      if (c === "r") {
+        let hashes = 0; while (src[j+1+hashes] === "#") hashes++;
+        const close = '"' + "#".repeat(hashes);
+        j = src.indexOf(close, j + hashes + 2); if (j < 0) j = n; else j += close.length;
+      } else {
+        while (j < n) { if (src[j] === "\\") j += 2; else if (src[j] === '"') { j++; break; } else j++; }
+      }
+      out += '<span class="s">' + esc(src.slice(i, j)) + "</span>"; i = j; continue;
+    }
+    // 标识符 / 关键字
+    if (isIdent(c) && !/[0-9]/.test(c)) {
+      let j = i; while (j < n && isIdent(src[j])) j++;
+      const w = src.slice(i, j);
+      if (KEYWORDS.includes(w)) out += '<span class="k">' + esc(w) + "</span>";
+      else if (/^(i64|u64|usize|isize|i32|u32|f64|f32|bool|String|Arc|Vec|Option|HashMap|Result)$/.test(w)) out += '<span class="t">' + esc(w) + "</span>";
+      else out += esc(w);
+      i = j; continue;
+    }
+    // 数字
+    if (/[0-9]/.test(c)) {
+      let j = i; while (j < n && /[0-9a-zA-Z_.]/.test(src[j])) j++;
+      out += '<span class="n">' + esc(src.slice(i, j)) + "</span>"; i = j; continue;
+    }
+    out += esc(c); i++;
+  }
+  return out;
+}
+function syncView(){
+  const src = codeEl.value;
+  state.source = src;
+  hlEl.innerHTML = highlight(src) + "\n";
+  const lines = src.split("\n").length;
+  let g = ""; for (let k = 1; k <= lines; k++) g += k + "\n";
+  gutEl.textContent = g;
+  gutEl.style.width = (8 + String(lines).length * 8) + "px";
+  hlEl.scrollTop = codeEl.scrollTop; hlEl.scrollLeft = codeEl.scrollLeft;
+  // 顶栏显示 Cell 数（不依赖后端，纯文本扫描）
+  const cells = (src.match(/^\s*cell\s+[A-Za-z_]/gm) || []).length;
+  $("#cellCount").textContent = cells ? `Cell × ${cells}` : "";
+}
+function pos(){
+  const v = codeEl.value.slice(0, codeEl.selectionStart);
+  const line = v.split("\n").length;
+  const col = v.length - v.lastIndexOf("\n");
+  $("#cursorPos").textContent = `行 ${line}, 列 ${col}`;
+}
+codeEl.addEventListener("input", syncView);
+codeEl.addEventListener("scroll", () => { hlEl.scrollTop = codeEl.scrollTop; hlEl.scrollLeft = codeEl.scrollLeft; });
+codeEl.addEventListener("keyup", () => { syncView(); pos(); });
+codeEl.addEventListener("click", pos);
+codeEl.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); check(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); return; }
+  if (e.key === "Tab") {
+    e.preventDefault();
+    const s = codeEl.selectionStart, t = codeEl.selectionEnd;
+    codeEl.setRangeText("  ", s, t, "end"); syncView();
+  }
+});
+
+/* --------------------------------------------------------- 后端调用 */
+async function api(path, body){
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+    body: new URLSearchParams(body || {}).toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(path + " → HTTP " + res.status + "\n" + text);
+  return JSON.parse(text);
+}
+function post(key, v){ $("#pillCheck").textContent = key; $("#pillCheck").className = "pill"; }
+
+/* --------------------------------------------------------- 检查 */
+let diagList = [];
+async function check(){
+  const t0 = performance.now();
+  let r;
+  try { r = await api("/api/check", { source: codeEl.value }); }
+  catch (e) { return failDiag(e.message); }
+  diagList = r.diagnostics || [];
+  const errs = diagList.filter(d => d.severity !== "warning").length;
+  const warns = diagList.length - errs;
+  const pill = $("#pillCheck");
+  pill.textContent = errs ? `${errs} 错误 / ${warns} 警告` : `OK（${r.cells} Cell，0 错误）`;
+  pill.className = "pill " + (errs ? "err" : warns ? "warn" : "ok");
+  $("#diagCount").textContent = `${((performance.now()-t0)|0)} ms`;
+  const box = $("#diagnostics"); box.innerHTML = "";
+  if (!diagList.length) {
+    box.innerHTML = '<span style="color:var(--accent)">前端全部通过：parse + C1 契约 / C2 收敛 / C3 依赖 / C4 所有权 / C5 遮蔽 / C6 可达 / C7 over 闭包 / C8 extern rust。</span>';
+  }
+  diagList.forEach((d, i) => {
+    const div = document.createElement("div");
+    div.className = "diag" + (d.severity === "warning" ? " w" : "");
+    div.innerHTML = `<div><span class="code">RSC-E${String(d.code).padStart(3,"0")}</span> ${esc(d.message||"")}</div>
+      <div class="loc">${esc(d.cell||"")} @ ${d.line||0}:${d.col||0}</div>
+      ${d.detail ? `<div class="detail">${esc(d.detail)}</div>` : ""}`;
+    div.onclick = () => gotoLine(d.line);
+    box.appendChild(div);
+  });
+  drawGraph();
+}
+function failDiag(msg){
+  $("#diagnostics").innerHTML = `<div class="diag"><div><span class="code">RSC</span> ${esc(msg)}</div></div>`;
+}
+function gotoLine(line){
+  if (!line) return;
+  const lines = codeEl.value.split("\n");
+  let off = 0; for (let k = 0; k < line - 1 && k < lines.length; k++) off += lines[k].length + 1;
+  codeEl.focus(); codeEl.setSelectionRange(off, off + (lines[line-1]||"").length);
+  codeEl.scrollTop = (line - 3) * 20; syncView(); pos();
+}
+
+/* --------------------------------------------------------- 拓扑图 */
+// 布局：入口 BFS 分层（按 jump 深度），每层纵向排开。为什么不用力导向：
+// 业务编排图的语义就是「深度 = 调用层级」，力导向每次刷新位置都变，
+// 调试时无法形成稳定心智模型；分层布局可复现、可读，且能一眼看出环（回边）。
+const KIND_CLASS = { plain:"plain", loop:"loop", recurse:"recurse", and:"and", sync:"sync" };
+function focusFilter(kind){
+  const m = $("#focusMode").value;
+  if (m === "all") return true;
+  if (m === "data") return kind === "plain" || kind === "recurse" || kind === "and";
+  if (m === "group") return kind === "and" || kind === "sync";
+  return kind === "loop" || kind === "recurse";
+}
+async function drawGraph(){
+  let g;
+  try { g = await api("/api/graph", { source: codeEl.value }); }
+  catch (e) { failDiag(e.message); return; }
+  state.graph = g;
+  const nodes = g.nodes || [], edges = g.edges || [];
+  const W = 210, H = (n) => 34 + 13 * Math.max(1, (n.receive||[]).length + (n.outputs||[]).length);
+  // BFS 分层
+  const depth = {}, adj = {};
+  nodes.forEach(n => { adj[n.name] = []; depth[n.name] = 0; });
+  edges.forEach(e => { if (adj[e.from]) adj[e.from].push(e.to); });
+  const start = (g.entry && depth[g.entry] !== undefined) ? g.entry : (nodes[0] && nodes[0].name);
+  const seen = new Set(); const q = [];
+  if (start) { q.push(start); seen.add(start); }
+  let d = 0;
+  while (q.length) {
+    const cur = [], next = [];
+    q.forEach(name => { depth[name] = d; (adj[name]||[]).forEach(t => { if (!seen.has(t) && adj[t] !== undefined) { seen.add(t); next.push(t); } }); });
+    q.length = 0; next.forEach(x => q.push(x)); d++;
+    if (d > 40) break;
+  }
+  nodes.forEach(n => { if (!seen.has(n.name)) { depth[n.name] = d; d++; } });  // 不可达 Cell 单独排层
+  const byDepth = {};
+  nodes.forEach(n => { const k = depth[n.name]; (byDepth[k] = byDepth[k] || []).push(n); });
+  const posOf = {};
+  let maxY = 0;
+  Object.keys(byDepth).map(Number).sort((a,b)=>a-b).forEach(k => {
+    const row = byDepth[k]; const x = 30 + k * (W + 70);
+    let y = 24;
+    row.forEach(n => { posOf[n.name] = { x, y, h: H(n) }; y += H(n) + 26; });
+    maxY = Math.max(maxY, y);
+  });
+  const svgW = 30 + (Object.keys(byDepth).length) * (W + 70) + 40;
+  let svg = `<svg width="${svgW}" height="${Math.max(maxY + 30, 320)}" xmlns="http://www.w3.org/2000/svg">`;
+  svg += `<defs>${Object.entries({plain:"var(--plain)",loop:"var(--loop)",recurse:"var(--recurse)",and:"var(--and)",sync:"var(--sync)"})
+    .map(([k,c]) => `<marker id="ar-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join("")}</defs>`;
+  // 边
+  edges.forEach((e, i) => {
+    const a = posOf[e.from], b = posOf[e.to];
+    if (!a || !b) return;
+    const on = focusFilter(e.kind);
+    const x1 = a.x + W, y1 = a.y + 18 + (i % 3) * 5;
+    const x2 = (b.x === a.x) ? b.x : b.x, y2 = b.y + 18;
+    let path;
+    if (e.kind === "loop" || e.from === e.to) {
+      // 自环：从右侧绕回顶部
+      path = `M ${a.x + W} ${a.y + 12} C ${a.x + W + 56} ${a.y - 6}, ${a.x + 40} ${a.y - 30}, ${a.x + 14} ${a.y + 6}`;
+    } else if (depth[e.to] <= depth[e.from]) {
+      // 回边 / 同层：走下方绕行，避免压穿节点
+      path = `M ${x1} ${y1} C ${x1 + 60} ${(y1 + y2) / 2 + 46}, ${x2 - 60} ${(y1 + y2) / 2 + 46}, ${x2} ${y2}`;
+    } else {
+      path = `M ${x1} ${y1} C ${x1 + 50} ${y1}, ${x2 - 50} ${y2}, ${x2} ${y2}`;
+    }
+    svg += `<path class="edge ${KIND_CLASS[e.kind]||"plain"} ${on?"":"dim"}" d="${path}" marker-end="url(#ar-${KIND_CLASS[e.kind]||'plain'})" data-edge="${i}"/>`;
+    const lab = [e.kind, e.mode, e.group ? `g:${e.group}` : "", e.limit ? `lim=${e.limit}` : "", (e.keys||[]).join(",")].filter(Boolean).join(" · ");
+    svg += `<text class="elabel ${on?"":"dim"}" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 6}" text-anchor="middle">${esc(lab)}</text>`;
+  });
+  // 节点
+  nodes.forEach(n => {
+    const p = posOf[n.name]; const h = p.h;
+    svg += `<g class="node ${n.is_entry?"entry":""}" data-cell="${esc(n.name)}" transform="translate(${p.x},${p.y})">`;
+    svg += `<rect width="${W}" height="${h}"></rect>`;
+    svg += `<text class="tname" x="10" y="18">${esc(n.name)}${n.is_entry?" ⟵ entry":""}${n.needs_async?" ⛟":""}</text>`;
+    let y = 32;
+    (n.receive||[]).slice(0, 6).forEach(r => {
+      svg += `<text class="slot" x="10" y="${y}">⇩ ${esc(r.key)}${r.type?": "+esc(r.type):""}</text>`; y += 13;
+    });
+    (n.outputs||[]).slice(0, 4).forEach(o => {
+      svg += `<text class="slot" x="10" y="${y}" style="fill:#9ece6a">⇧ ${esc(o.key)}${o.type?": "+esc(o.type):""}</text>`; y += 13;
+    });
+    if ((n.receive||[]).length > 6) svg += `<text class="slot" x="10" y="${y}">…</text>`;
+    svg += "</g>";
+  });
+  svg += "</svg>";
+  const legend = $("#legend").outerHTML;
+  $("#graph").innerHTML = svg + legend;
+  $("#graph").querySelectorAll(".node").forEach(el => {
+    el.addEventListener("click", () => selectCell(el.getAttribute("data-cell")));
+  });
+  if (state.sel) selectCell(state.sel, true);
+}
+function selectCell(name, keep){
+  state.sel = name;
+  $("#graph").querySelectorAll(".node").forEach(el => {
+    el.classList.toggle("sel", el.getAttribute("data-cell") === name);
+  });
+  const n = (state.graph?.nodes || []).find(x => x.name === name);
+  switchTab("detail");
+  const box = $("#detail") || $("#pane-detail");
+  if (!n) { box.innerHTML = '<span style="color:var(--dim)">没有该节点。</span>'; return; }
+  const edges = (state.graph?.edges || []).filter(e => e.from === name || e.to === name);
+  const diags = diagList.filter(d => d.cell === name);
+  const rows = (list, label, cls) => `<div class="row"><span class="k2">${label}</span><span>${
+    (list||[]).map(x => `<span class="${cls||''}" title="${esc(x.type||'')}">${esc(x.key||x.name||String(x))}</span>`).join(" · ") || '<span style="color:var(--dim)">（空）</span>'
+  }</span></div>`;
+  box.innerHTML = `<h4 style="margin:0 0 8px">${esc(n.name)} ${n.is_entry?'<span class="pill">entry</span>':""} ${n.needs_async?'<span class="pill">async fn</span>':""}</h4>
+    <div class="row"><span class="k2">DSL 位置</span><span>第 ${n.line||0} 行</span></div>
+    ${rows(n.receive, "receive", "r")}
+    ${rows(n.outputs, "exit 输出")}
+    <div class="row"><span class="k2">所有权</span><span>${(n.ownership||[]).map(o=>`${esc(o.name)}=${esc(o.state)}`).join(" · ")||"—"}</span></div>
+    <div class="row"><span class="k2">终结方式</span><span>${esc(n.terminal||"（非出口，继续往下）")}</span></div>
+    <div class="row"><span class="k2">相邻边</span><span>${edges.map(e=>`${e.from}→${e.to} <span class="pill" style="border-color:var(--${KIND_CLASS[e.kind]})">${e.kind}</span>`).join(" ")||"—"}</span></div>
+    ${n.risks && n.risks.length ? `<div class="row"><span class="k2">风险点</span><span style="color:var(--warn)">${esc(n.risks.join("；"))}</span></div>`:""}
+    <div style="margin-top:8px">${diags.length ? diags.map(d=>`<div class="diag${d.severity==="warning"?" w":""}"><span class="code">RSC-E${String(d.code).padStart(3,"0")}</span> ${esc(d.message)} <span class="loc">@${d.line}:${d.col}</span></div>`).join("") : '<span style="color:var(--dim)">该 Cell 无诊断。</span>'}</div>`;
+  if (!keep) $("#tabStatus").textContent = "节点：" + name;
+}
+
+/* --------------------------------------------------------- trace 干跑 */
+async function runTrace(){
+  let r;
+  try { r = await api("/api/trace", { source: codeEl.value, maxItems: $("#maxItems").value || "4" }); }
+  catch (e) { failDiag(e.message); return; }
+  state.trace = r.steps || [];
+  const box = $("#traceSteps"); box.innerHTML = "";
+  if (!state.trace.length) box.innerHTML = '<span style="color:var(--dim)">没有可模拟的步（检查入口是否可达）。</span>';
+  state.trace.forEach((s, i) => {
+    const div = document.createElement("div");
+    div.className = "step"; div.id = "step-" + i;
+    const pk = (s.packet||[]).map(p => `<span class="kk">${esc(p.key)}=${esc(p.value)}</span>${p.died?' <span class="died">(died)</span>':""}`).join(" ");
+    div.innerHTML = `<b>${s.seq}</b> · ${esc(s.cell)} @${s.line} <span class="kk">[${esc(s.kind)}]</span> ${esc(s.text||"")}
+      ${pk?`<div>Packet: ${pk}</div>`:""} ${s.note?`<div style="color:var(--dim)">${esc(s.note)}</div>`:""}`;
+    box.appendChild(div);
+  });
+  const tl = $("#timeline"); tl.max = Math.max(0, state.trace.length - 1); tl.value = 0; tl.disabled = false;
+  $("#btnPlay").disabled = state.trace.length < 2;
+  tl.oninput = () => highlightStep(+tl.value);
+  $("#tabStatus").textContent = `${state.trace.length} 步` + ((r.notes||[]).length ? ` · ${r.notes.join(" ")}` : "");
+  switchTab("trace"); highlightStep(0);
+}
+function highlightStep(i){
+  (state.trace||[]).forEach((s, k) => {
+    const el = $("#step-" + k); if (el) el.classList.toggle("cur", k === i);
+  });
+  const cur = (state.trace||[])[i];
+  if (cur && cur.cell) { if (state.graph) selectCell(cur.cell, true); }
+}
+function play(){
+  if (state.playTimer) { clearInterval(state.playTimer); state.playTimer = 0; $("#btnPlay").textContent = "▶ 回放"; return; }
+  const tl = $("#timeline");
+  $("#btnPlay").textContent = "⏸ 暂停";
+  state.playTimer = setInterval(() => {
+    let v = +tl.value + 1;
+    if (v > +tl.max) { v = 0; }
+    tl.value = v; highlightStep(v);
+  }, 700);
+}
+
+/* --------------------------------------------------------- 构建 & 产物 */
+async function buildAndRun(){
+  $("#buildStat").textContent = "编译中…";
+  let r;
+  try { r = await api("/api/build", { source: codeEl.value, mode: $("#buildMode").value }); }
+  catch (e) { $("#buildStat").textContent = "失败"; failDiag(e.message); return; }
+  state.artifact = r;
+  const pill = $("#pillBuild");
+  pill.textContent = r.exit === 0 ? "构建+运行 OK" : `退出码 ${r.exit}`;
+  pill.className = "pill " + (r.exit === 0 ? "ok" : "err");
+  $("#buildStat").textContent = `${r.rsPath || ""} → ${r.exePath || ""}`;
+  let txt = "";
+  if (r.mapped && r.mapped.length) {
+    txt += "// rustc 诊断（已反映射回 DSL 位置）\n";
+    txt += r.mapped.map(m => `${m.code}: ${m.detail || m.message || ""}`).join("\n") + "\n\n";
+  }
+  txt += "// stdout\n" + (r.stdout || "(空)") + "\n// stderr\n" + (r.stderr || "(空)");
+  $("#buildOut").textContent = txt;
+  switchTab("build");
+}
+async function readArtifact(){
+  const kind = $("#artifact").value;
+  try {
+    const res = await fetch("/api/source?kind=" + kind);
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || ("HTTP " + res.status));
+    $("#artifactOut").textContent = text;
+    $("#artifactPath").textContent = (state.artifact[kind === "rs" ? "rsPath" : "mapPath"]) || "";
+    switchTab("rs");
+  } catch (e) { failDiag(e.message); }
+}
+
+/* --------------------------------------------------------- 保存 */
+async function save(){
+  try {
+    const r = await api("/api/save", { source: codeEl.value, file: state.file || "" });
+    state.file = r.file || state.file;
+    $("#fileName").textContent = state.file || "未命名";
+    $("#tabStatus").textContent = r.message || "已保存";
+    check();
+  } catch (e) { failDiag(e.message); }
+}
+
+/* --------------------------------------------------------- 页签 */
+function switchTab(name){
+  ["detail","trace","build","rs"].forEach(k => {
+    $("#pane-" + k).style.display = (k === name) ? "block" : "none";
+  });
+  document.querySelectorAll(".tab").forEach(b => {
+    b.classList.toggle("pri", b.getAttribute("data-tab") === name);
+  });
+}
+document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => switchTab(b.getAttribute("data-tab"))));
+
+/* --------------------------------------------------------- 样例（内置，离线可用） */
+const EXAMPLES = {
+  factorial_loop: `entry main;\n\n// 附录 A.1：jump loop 版阶乘，输出 120\ncell main;\nreceive();\nlet five: i64 = 5;\njump fact go with(five -> n, 1i64 -> acc);\n\ncell fact;\nreceive(n: i64, acc: i64) as (cur, sum);\nlet next = cur - 1;\nlet next_acc = sum * cur;\njump loop fact when next > 0 go with(next, next_acc);\nout(next_acc);\nexit go with(next_acc -> result);\n`,
+  jump_and_worker: `entry start;\n\n// 附录 A.2：jump and 派生 3 个 worker → concurrent_limit=2 → jump sync 解包\ncell start;\nreceive(g1.W1.d, g1.W2.d, g1.W3.d) as (a, b, c);\nlet items = [1, 2, 3];\njump and worker over items concurrent_limit=2 group g1;\njump sync g1;\nout("total=", a + b + c);\nexit go with();\n\ncell worker;\nreceive(x: i64);\nexit go with(x * 2 -> d);\n`,
+  recurse_return: `entry main;\n\n// §6.3：jump recurse + return 映射（D3 内联 await），递归阶乘\ncell main;\nreceive();\nlet mut r: Option<i64> = None;\njump recurse fact go with(5i64 -> n) return(product -> r) group r0;\njump sync r0;\nout("result = ", r.unwrap_or(-1));\nexit go with();\n\ncell fact;\nreceive(n: i64);\nlet mut sub_result: Option<i64> = None;\njump recurse fact when n > 1 go with(n - 1 -> n) return(product -> sub_result) group r1;\njump sync r1;\nlet result = n * sub_result.unwrap_or(1);\nexit go with(result -> product);\n`,
+  read_with: `entry a;\n\n// §8.1 / 附录 A.7：read with 三层只读转发，原始数据只存一份\ncell a;\nreceive();\nlet big_data = "some large read-only data".to_string();\njump recurse b read with(big_data) group g1;\njump sync g1;\nout("group g1 done");\nexit go with();\n\ncell b;\nreceive(big_data: Arc<String>);\njump recurse c read with(big_data) group g2;\njump sync g2;\nexit go with();\n\ncell c;\nreceive(big_data: Arc<String>);\nout("len = ", big_data.len());\nexit go with();\n`,
+  multi_source: `entry main;\n\n// §6.4：多目标 jump and，W1/W2 按入组顺序对应两个目标 Cell\ncell main;\nreceive(g1.W1.A: i64, g1.W2.A: i64) as (a1, a2);\njump and worker1, worker2 go with(0i64 -> x) group g1;\njump sync g1;\nout("worker1=", a1, " worker2=", a2);\nexit go with();\n\ncell worker1;\nreceive(x: i64);\nexit go with(x * 2 -> A);\n\ncell worker2;\nreceive(x: i64);\nexit go with(x + 100 -> A);\n`,
+  die_branch: `entry main;\n\n// §5.3：互斥分支 + die 兜底\ncell main;\nreceive(mode: i64);\njump a when mode == 1 go with(mode -> v);\njump b when mode == 2 go with(mode -> v);\ndie;\n\ncell a;\nreceive(v: i64);\nout("branch a: ", v);\nexit go with();\n\ncell b;\nreceive(v: i64);\nout("branch b: ", v);\nexit go with();\n`,
+  broken: `entry main;\n\n// 故意写错，用来看诊断：\n//   E044：main 里 sync 的 group 不存在；w 的 receive 键没来源\n//   E010：exit 之后还挂着语句（永远不会执行）\ncell main;\nreceive();\njump sync g9;\nexit go with();\nout("到不了这里");\n\ncell w;\nreceive(x: i64);\nexit go with(x -> d);\n`,
+};
+$("#example").addEventListener("change", (e) => {
+  const k = e.target.value; if (!k) return;
+  codeEl.value = EXAMPLES[k]; state.file = null; $("#fileName").textContent = `样例：${k}`;
+  syncView(); check();
+});
+$("#focusMode").addEventListener("change", drawGraph);
+$("#btnCheck").addEventListener("click", check);
+$("#btnGraph").addEventListener("click", drawGraph);
+$("#btnSave").addEventListener("click", save);
+$("#btnTrace").addEventListener("click", runTrace);
+$("#btnPlay").addEventListener("click", play);
+$("#btnBuild").addEventListener("click", buildAndRun);
+$("#btnArtifact").addEventListener("click", readArtifact);
+
+/* 启动：读 ?file= 或 /api/initial 拿当前文档 */
+(async function boot(){
+  syncView();
+  try {
+    const res = await fetch("/api/initial");
+    if (res.ok) {
+      const j = await res.json();
+      if (j.source) { codeEl.value = j.source; state.file = j.file || null;
+        $("#fileName").textContent = j.file || "未命名"; }
+    }
+  } catch (e) { /* 离线打开本页也照样能用（编辑器 + 内置样例） */ }
+  syncView(); check();
+})();
+</script>
+</body>
+</html>

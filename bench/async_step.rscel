@@ -1,0 +1,31 @@
+// 判定场景（docs/05 P0-5 第 3 项）：与 bench/loop_sum_opaque.rscel **同一条递推、同一个
+// checksum=1249999975000000**，唯一的结构差是热 Cell `sum` 的透传 Rust 里出现 `.await`
+// —— 按批次 A 的规则（「只有透传出现 .await 的 Cell 才是 async fn」）它因此生成
+// `async fn cell_sum(..)`，而 async Cell 被展开闸门硬排除（块表达式不是 async 上下文）。
+//
+// 为什么要单独一份 DSL 而不是在 loop_sum_opaque 上改：那格是**门禁分母**，动它就动了
+// 全部历史读数。本格只做一件事 —— 把「future 边界值多少钱」固定成一个可复现的场景。
+//
+// 测量台：bash scripts/bench/async_probe.sh（变体全部从本 DSL 的**真实生成物**按文本锚点
+// 派生，判定规则与 docs/06 实验六/七同口径）。
+extern rust {
+    // 每轮迭代都过一次 future：这就是"async Cell 到底额外付了什么"的那个因素。
+    async fn rsc_step(x: i64) -> i64 { std::hint::black_box(x) }
+};
+
+entry main;
+
+cell main;
+receive();
+jump sum go with(std::hint::black_box(0i64) -> acc, std::hint::black_box(1i64) -> k);
+
+cell sum;
+receive(acc: i64, k: i64) as (a, i);
+let t0 = std::time::Instant::now();
+let limit = std::hint::black_box(1000000000i64);
+let next_acc: i64 = rsc_step(a + i).await;
+let next_i = i + 1;
+jump loop sum when next_i <= limit go with(next_acc, next_i);
+println!("checksum={}", a);
+println!("elapsed_ns={}", t0.elapsed().as_nanos());
+exit go with();

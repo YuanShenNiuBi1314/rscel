@@ -1,0 +1,32 @@
+// 基准场景 3：`read with` 只读共享（§8.1 Arc 引用计数）。
+//   一个大 payload 用 Arc 分发给 50 万个并行实例，每实例只做一次不可消除的读取。
+// 对照实现：bench/read_share_hand.rs（同样的 Arc::clone + 同样的读取）。
+// 元素数从 5 万放大到 50 万（2026-10-11）与理由见 bench/pipeline_and.rscel 头部
+// （docs/05 P0-5 第 5 项「换量法」① ：放大前单次 ~6ms，复现带比要判的差值还宽）。
+entry main;
+
+cell main;
+receive();
+let t0 = std::time::Instant::now();
+let payload = "rscel read-only payload for arc benchmark".repeat(64);
+let items: Vec<i64> = (1..=500000i64).collect();
+// 同 bench/pipeline_and.rscel：`over items` 会 move 掉 items，len() 必须在此之前取，
+// 否则生成物 use-after-move 被 rustc E0382 拒掉（2026-10-10 实测）。
+let spins = items.len();
+// jump 的可选段顺序是规格固定的（开发说明 §11「jump 解析」/docs/02 §7）：
+//   目标 → when → go with/read with → return → over → concurrent_limit → group
+// 写成 `over items read with(payload)` 会让 read with 落在 over 之后、不被识别。
+jump and consumer read with(payload) over items concurrent_limit = 8 group g1;
+jump sync g1;
+println!("spins={}", spins);
+println!("elapsed_ns={}", t0.elapsed().as_nanos());
+exit go with();
+
+cell consumer;
+// §8.1 的绑定规则是**同名**：`read with(payload)` 填的是子 Cell 里名为 `payload` 的
+// receive 键（规范 §8.1 样例即 `read with(big_data)` ↔ `receive(big_data: Arc<..>)`）。
+// 本文件原先写成 `receive(x: i64, data: Arc<String>)`，`data` 不等于 `payload`，
+// 契约期按上面那条判据认定 `payload` 无来源 → RSC-E042（2026-10-10 实测）。
+receive(x: i64, payload: Arc<String>);
+let _h = std::hint::black_box(payload.as_bytes()[7]) ^ std::hint::black_box(x as u8);
+exit go with();

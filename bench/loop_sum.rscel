@@ -1,0 +1,22 @@
+// 基准场景 1：`jump loop` 原地累加 5000 万次（§17.2 第一档：纯同步、无 async、无 Arc）。
+// 对照实现：bench/loop_sum_hand.rs（同一循环结构的自然 Rust）。
+//
+// `black_box` 是**必须**的：limit 写成常量时 LLVM 会把"对等差数列求和"
+// 向量化掉（两边都 30µs 量级），量级太小让比值完全被噪声支配，测不出
+// Cell 调用约定的真实成本。让 limit 对优化器不透明，两边跑的是同一条标量循环。
+entry main;
+
+cell main;
+receive();
+jump sum go with(0i64 -> acc, 1i64 -> k);
+
+cell sum;
+receive(acc: i64, k: i64) as (a, i);
+let t0 = std::time::Instant::now();
+let limit = std::hint::black_box(1000000000i64);
+let next_acc = a + i;
+let next_i = i + 1;
+jump loop sum when next_i <= limit go with(next_acc, next_i);
+println!("checksum={}", a);
+println!("elapsed_ns={}", t0.elapsed().as_nanos());
+exit go with();
