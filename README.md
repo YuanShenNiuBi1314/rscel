@@ -1,6 +1,7 @@
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 
 # RSupercell（`rscel`）
+> If you find this interesting, a star would help a lot - issues and design critiques are even better.
 
 ## English summary
 
